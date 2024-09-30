@@ -16,6 +16,8 @@ use op_alloy_genesis::{RollupConfig, SystemConfig};
 const REGOLITH_SYSTEM_TX_GAS: u128 = 1_000_000;
 /// The type byte identifier for the L1 scalar format in Ecotone.
 const L1_SCALAR_ECOTONE: u8 = 1;
+/// The type byte identifier for the L1 scalar format in Holocene.
+const L1_SCALAR_HOLOCENE: u8 = 2;
 /// The length of an L1 info transaction in Bedrock.
 const L1_INFO_TX_LEN_BEDROCK: usize = 4 + 32 * 8;
 /// The length of an L1 info transaction in Ecotone.
@@ -148,6 +150,8 @@ pub struct L1BlockInfoEcotone {
 /// | 32      | BatcherHash              |
 /// | 8       | Eip1559Denominator       |
 /// | 8       | Eip1559Elasticity        |
+/// | 4       | OperatorFeeScalar        |
+/// | 8       | OperatorFeeConstant      |
 /// +---------+--------------------------+
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Default, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -174,6 +178,10 @@ pub struct L1BlockInfoHolocene {
     pub eip_1559_denominator: u64,
     /// The EIP-1559 elasticity parameter
     pub eip_1559_elasticity: u64,
+    /// The operator fee scalar
+    pub operator_fee_scalar: u32,
+    /// The operator fee constant
+    pub operator_fee_constant: u64,
 }
 
 /// An error type for parsing L1 block info transactions.
@@ -187,6 +195,10 @@ pub enum BlockInfoError {
     Eip1559Denominator,
     /// Failed to parse the EIP-1559 elasticity parameter.
     Eip1559Elasticity,
+    /// Failed to parse the Operator Fee Scalar.
+    OperatorFeeScalar,
+    /// Failed to parse the Operator Fee Constant.
+    OperatorFeeConstant,
 }
 
 impl core::fmt::Display for BlockInfoError {
@@ -201,6 +213,12 @@ impl core::fmt::Display for BlockInfoError {
             }
             Self::Eip1559Elasticity => {
                 write!(f, "Failed to parse the EIP-1559 elasticity parameter")
+            }
+            Self::OperatorFeeScalar => {
+                write!(f, "Failed to parse the Operator fee scalar parameter")
+            }
+            Self::OperatorFeeConstant => {
+                write!(f, "Failed to parse the Operator fee constant parameter")
             }
         }
     }
@@ -237,7 +255,7 @@ impl L1BlockInfoTx {
     ) -> Result<Self, BlockInfoError> {
         if rollup_config.is_holocene_active(l2_block_time) {
             let scalar = system_config.scalar.to_be_bytes::<32>();
-            let blob_base_fee_scalar = (scalar[0] == L1_SCALAR_ECOTONE)
+            let blob_base_fee_scalar = (scalar[0] >= L1_SCALAR_ECOTONE)
                 .then(|| {
                     Ok::<u32, BlockInfoError>(u32::from_be_bytes(
                         scalar[24..28]
@@ -260,6 +278,17 @@ impl L1BlockInfoTx {
                 .elasticity_multiplier
                 .try_into()
                 .map_err(|_| BlockInfoError::Eip1559Elasticity)?;
+            let (operator_fee_scalar, operator_fee_constant) = if scalar[0] == L1_SCALAR_HOLOCENE {
+                let operator_fee_scalar = Ok::<u32, BlockInfoError>(u32::from_be_bytes(
+                    scalar[12..16].try_into().map_err(|_| BlockInfoError::OperatorFeeScalar)?,
+                ))?;
+                let operator_fee_constant = Ok::<u64, BlockInfoError>(u64::from_be_bytes(
+                    scalar[16..24].try_into().map_err(|_| BlockInfoError::OperatorFeeConstant)?,
+                ))?;
+                (operator_fee_scalar, operator_fee_constant)
+            } else {
+                (0, 0)
+            };
             return Ok(Self::Holocene(L1BlockInfoHolocene {
                 number: l1_header.number,
                 time: l1_header.timestamp,
@@ -272,6 +301,8 @@ impl L1BlockInfoTx {
                 base_fee_scalar,
                 eip_1559_denominator,
                 eip_1559_elasticity,
+                operator_fee_scalar,
+                operator_fee_constant,
             }));
         }
         // In the first block of Ecotone, the L1Block contract has not been upgraded yet due to the
@@ -584,6 +615,8 @@ impl L1BlockInfoHolocene {
         buf.extend_from_slice(self.batcher_address.into_word().as_ref());
         buf.extend_from_slice(self.eip_1559_denominator.to_be_bytes().as_ref());
         buf.extend_from_slice(self.eip_1559_elasticity.to_be_bytes().as_ref());
+        buf.extend_from_slice(self.operator_fee_scalar.to_be_bytes().as_ref());
+        buf.extend_from_slice(self.operator_fee_constant.to_be_bytes().as_ref());
         buf.into()
     }
 
@@ -627,6 +660,12 @@ impl L1BlockInfoHolocene {
         let eip_1559_elasticity = u64::from_be_bytes(r[172..180].try_into().map_err(|_| {
             DecodeError::ParseError("Conversion error for EIP-1559 elasticity".to_string())
         })?);
+        let operator_fee_scalar = u32::from_be_bytes(r[180..183].try_into().map_err(|_| {
+            DecodeError::ParseError("Conversion error for operator fee scalar".to_string())
+        })?);
+        let operator_fee_constant = u64::from_be_bytes(r[184..180].try_into().map_err(|_| {
+            DecodeError::ParseError("Conversion error for operator fee constant".to_string())
+        })?);
 
         Ok(Self {
             number: l1_block_number,
@@ -640,6 +679,8 @@ impl L1BlockInfoHolocene {
             base_fee_scalar,
             eip_1559_denominator,
             eip_1559_elasticity,
+            operator_fee_scalar,
+            operator_fee_constant,
         })
     }
 }
@@ -757,6 +798,8 @@ mod test {
             base_fee_scalar: 1368,
             eip_1559_denominator: 0x1234,
             eip_1559_elasticity: 0x5678,
+            operator_fee_scalar: 0xabcd,
+            operator_fee_constant: 0xdcba,
         };
 
         let L1BlockInfoTx::Holocene(decoded) =
