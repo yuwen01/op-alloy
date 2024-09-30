@@ -278,17 +278,20 @@ impl L1BlockInfoTx {
                 .elasticity_multiplier
                 .try_into()
                 .map_err(|_| BlockInfoError::Eip1559Elasticity)?;
-            let (operator_fee_scalar, operator_fee_constant) = if scalar[0] == L1_SCALAR_HOLOCENE {
-                let operator_fee_scalar = Ok::<u32, BlockInfoError>(u32::from_be_bytes(
-                    scalar[12..16].try_into().map_err(|_| BlockInfoError::OperatorFeeScalar)?,
-                ))?;
-                let operator_fee_constant = Ok::<u64, BlockInfoError>(u64::from_be_bytes(
-                    scalar[16..24].try_into().map_err(|_| BlockInfoError::OperatorFeeConstant)?,
-                ))?;
-                (operator_fee_scalar, operator_fee_constant)
-            } else {
-                (0, 0)
-            };
+            let (operator_fee_scalar, operator_fee_constant) = (scalar[0] == L1_SCALAR_HOLOCENE)
+                .then(|| {
+                    let operator_fee_scalar = u32::from_be_bytes(
+                        scalar[12..16].try_into().map_err(|_| BlockInfoError::OperatorFeeScalar)?,
+                    );
+                    let operator_fee_constant = u64::from_be_bytes(
+                        scalar[16..24]
+                            .try_into()
+                            .map_err(|_| BlockInfoError::OperatorFeeConstant)?,
+                    );
+                    Ok::<(u32, u64), BlockInfoError>((operator_fee_scalar, operator_fee_constant))
+                })
+                .transpose()?
+                .unwrap_or_default();
             return Ok(Self::Holocene(L1BlockInfoHolocene {
                 number: l1_header.number,
                 time: l1_header.timestamp,
